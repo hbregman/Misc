@@ -1,0 +1,200 @@
+---
+title: "Data Challenge"
+author: "Hallie Bregman"
+date: "January 23, 2016"
+output: word_document
+---
+
+# Data Exploration
+
+```{r echo=FALSE}
+#load packages
+library(ggplot2)
+#library(dplyr)
+library(corrplot)
+library(caret)
+library(randomForest)
+library('caretEnsemble')
+```
+
+```{r}
+#read in data
+train = read.csv("/Users/halliebregman/Downloads/train.csv")
+test = read.csv("/Users/halliebregman/Downloads/test.csv")
+
+#examine data to make sure it read in correctly
+head(train)
+head(test)
+```
+
+```{r}
+#look at summary data for train
+summary(train)
+#Need dependent variable for training data, remove missing data
+train <- train[ which(!is.na(train$downloads)),]
+#look at type of each column
+sapply(train, class)
+
+#for factors/booleans, examine frequencies
+cats <- train[c('app_id', 'date', 'country', 'rank_kind', 'age_restrictions', 'offers_in_app_purchases', 'paid', 'total_estimated_installs', 'operating_system')]
+sapply(cats, table)
+
+#plot distributions
+num <- train[c('app_id', 'date', 'rank', 'rank_category', 'us_price', 'app_category', 'app_subcategory', 'downloads')]
+
+#plot distributions
+plotter <- function(data){
+  for (i in 1:ncol(data)){
+    plot(data[,i],main=names(data)[i])
+  }
+}
+
+par(mfrow=c(2, 2))
+plotter(train)
+
+#Plot relationships between numeric variables
+par(mar=c(3, 3, 3, 3))
+par(mfrow=c(1, 1))
+plot(num)
+
+#Observations: Rank_Category has a linear relationship with downloads.
+
+#Plot downloads colored by categorical variables for any obvious relationships
+p <- ggplot(data=train, aes(x=app_id, y=downloads)) 
+p + geom_point(aes(colour=factor(rank_kind)))
+p + geom_point(aes(colour=factor(country)))
+p + geom_point(aes(colour=factor(age_restrictions)))
+p + geom_point(aes(colour=factor(offers_in_app_purchases)))
+p + geom_point(aes(colour=factor(paid))) #When paid = TRUE, downloads is near 0
+p + geom_point(aes(colour=factor(total_estimated_installs))) 
+p + geom_point(aes(colour=factor(operating_system)))
+
+#Look at correlations between numeric variables
+c <- cor(num[c(-1, -2)])
+par(mfrow=c(1, 1))
+corrplot.mixed(c)
+```
+
+#Preprocessing
+
+```{r}
+#Dummy code factors
+dummies <- dummyVars(downloads ~ . - app_id, data = train)
+df <- data.frame(predict(dummies, newdata = train))
+dummies <- dummyVars( ~ . - app_id, data = test)
+newtest <- data.frame(predict(dummies, newdata = test))
+newtest$total_estimated_installs.5.000.000...10.000.000 = 0
+newtest$age_restrictions.High.Maturity = 0
+names(newtest)
+names(df)
+
+#Remove collinearity
+c <- cor(df)
+highcorrs <- findCorrelation(c, cutoff = .80)
+newcorrs <- c[,-highcorrs]
+corrs <- cor(newcorrs)
+highcorrs
+
+#Remove collinear variables 
+df <- df[c(-16, -31, -26, -28)]
+```
+
+#Modeling
+
+```{r}
+#Set 10-fold repeated crossvalidation
+fitControl <- trainControl(method='repeatedCV', number=10, repeats=10)
+
+#Start with all variables and linear regression
+set.seed(801)
+fit <- train(train$downloads ~ ., data=df, method="lm", trControl=fitControl)
+summary(fit) # show results
+plot(varImp(fit), top=20) #plot top 20 variable importance
+
+#Top 20 variables based on feature importance
+set.seed(801)
+fit2 <- train(train$downloads ~ country.CA + country.FR +                                country.AU + country.KR + country.ES+ country.DE +
+               country.JP + country.RU + country.GB +                                   total_estimated_installs.5.000.000...10.000.000 +                        total_estimated_installs.1.000.000...5.000.000 +
+               operating_system.4.0.3.and.up + 
+               operating_system.4.0.and.up +
+               age_restrictions.High.Maturity +
+               operating_system.2.1.and.up +
+               total_estimated_installs.10...50 + 
+               rank_kind.new_free + 
+               total_estimated_installs.100...500 +
+               operating_system.2.2.and.up, data=df, method="lm",                       trControl=fitControl)
+summary(fit2) # show results
+plot(varImp(fit2)) #Plot variable importance
+
+#Rsquared drops from .3847 to .2979 with the removal of predictors below top 20
+
+
+#Whittle down number of variables included to reduce complexity
+set.seed(801)
+fit3 <- train(train$downloads ~ country.CA + country.FR +                                country.AU + country.KR + country.ES+ country.DE +
+               country.JP + country.RU + country.GB +                                   total_estimated_installs.5.000.000...10.000.000 +                        total_estimated_installs.1.000.000...5.000.000 +
+               age_restrictions.High.Maturity,
+               data=df, method="lm", trControl=fitControl)
+summary(fit3) # show results
+plot(varImp(fit3)) #Plot variable importance
+
+#Rsquared drops from .2979 to .2818 with the removal of additional predictors
+
+#Now let's try some additional models- first up, random forest
+set.seed(801)
+fit4 <- train(train$downloads ~ country.CA + country.FR +                                country.AU + country.KR + country.ES+ country.DE +
+               country.JP + country.RU + country.GB +                                                       total_estimated_installs.5.000.000...10.000.000 + #this isn't present in the test set
+               total_estimated_installs.1.000.000...5.000.000 +
+               age_restrictions.High.Maturity,
+               data=df, method="rf", trControl=fitControl, importance=TRUE)
+summary(fit4) # show results
+plot(varImp(fit4)) #Plot variable importance
+print(fit4$finalModel)
+fit4$results
+mean(fit4$results$Rsquared)
+mean(fit4$results$RMSE)
+
+#Variance explained improved to ~41% and RMSE is lowest at 27.84
+
+#Now let's try cubist
+set.seed(801)
+fit5 <- train(train$downloads ~ country.CA + country.FR +                                country.AU + country.KR + country.ES+ country.DE +
+               country.JP + country.RU + country.GB +                                   total_estimated_installs.5.000.000...10.000.000 +                        total_estimated_installs.1.000.000...5.000.000 +
+               age_restrictions.High.Maturity,
+               data=df, method="cubist", trControl=fitControl)
+summary(fit5) # show results
+plot(varImp(fit5)) #Plot variable importance
+print(fit5$results)
+mean(fit5$results$Rsquared)
+mean(fit5$results$RMSE)
+
+#Variance explained drops to 33.88%
+
+#Ensemble model
+set.seed(825)
+model_list <- caretList(
+               train$downloads~country.CA + country.FR +                                      country.AU + country.KR + country.ES+ country.DE +
+               country.JP + country.RU + country.GB +                                   total_estimated_installs.5.000.000...10.000.000 +                        total_estimated_installs.1.000.000...5.000.000 +
+               age_restrictions.High.Maturity, data=df,
+               methodList=c('glm', 'rf', 'cubist')
+  )
+greedy_ensemble <- caretEnsemble(model_list)
+summary(greedy_ensemble)
+greedy_ensemble$models
+
+#The ensemble model does not improve variance explained signficantly, so will stick to Random Forest as best fitting model to reduce complexity
+```
+
+#Prediction
+
+```{r}
+test$downloads <- predict(fit4, newdata=newtest)
+
+#Compare distribution of downloads to Train
+par(mfrow=c(2,1))
+par(mar=c(2, 2, 2, 2))
+plot(train$downloads) #the ceiling is higher in the train set
+plot(test$downloads)
+
+write.csv(test, "/Users/halliebregman/Downloads/test_predicted.csv")
+```
